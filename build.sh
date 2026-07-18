@@ -418,6 +418,11 @@ BUILD_DIR=$(read_ini_by_key "BUILD_DIR")
 COMMIT_HASH=$(read_ini_by_key "COMMIT_HASH")
 COMMIT_HASH=${COMMIT_HASH:-none}
 
+export WRT_BUILD_DEVICE="$Dev"
+if [[ $Dev == "jdcloud_ipq60xx_immwrt" ]]; then
+    export DOCKER_STACK_STORAGE_DRIVER="overlay2"
+fi
+
 resolve_config_fragments
 
 if [[ $Build_Mod == "config_preview" ]]; then

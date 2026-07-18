@@ -1,0 +1,96 @@
+#!/bin/sh
+
+TAG="jdcloud-docker-storage"
+MOUNT_POINT="/opt/docker"
+
+log_error() {
+	logger -t "$TAG" -p err "$*"
+	echo "$TAG: $*" >&2
+}
+
+board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+case "$board" in
+	jdcloud,re-ss-01|jdcloud,re-cs-02|jdcloud,re-cs-07|redmi,ax5-jdcloud)
+		;;
+	*)
+		exit 0
+		;;
+esac
+
+block_output="$(block info 2>/dev/null)" || {
+	log_error "cannot enumerate block devices"
+	exit 1
+}
+
+devices="$(printf '%s\n' "$block_output" | awk -F: '/[[:space:]]LABEL="docker"([[:space:]]|$)/ { print $1 }')"
+device_count="$(printf '%s\n' "$devices" | awk 'NF { count++ } END { print count + 0 }')"
+
+if [ "$device_count" -ne 1 ]; then
+	log_error "expected exactly one filesystem labeled docker, found $device_count; refusing root-overlay fallback"
+	exit 1
+fi
+
+device="$(printf '%s\n' "$devices" | awk 'NF { print; exit }')"
+device_info="$(printf '%s\n' "$block_output" | awk -F: -v dev="$device" '$1 == dev { print; exit }')"
+uuid="$(printf '%s\n' "$device_info" | sed -n 's/.* UUID="\([^"]*\)".*/\1/p')"
+fstype="$(printf '%s\n' "$device_info" | sed -n 's/.* TYPE="\([^"]*\)".*/\1/p')"
+
+[ -n "$uuid" ] || {
+	log_error "$device has no filesystem UUID"
+	exit 1
+}
+
+[ "$fstype" = "ext4" ] || {
+	log_error "$device uses $fstype instead of ext4"
+	exit 1
+}
+
+mkdir -p "$MOUNT_POINT" || {
+	log_error "cannot create $MOUNT_POINT"
+	exit 1
+}
+
+mounted_source="$(awk -v target="$MOUNT_POINT" '$2 == target { print $1; exit }' /proc/mounts)"
+if [ -n "$mounted_source" ] && [ "$mounted_source" != "$device" ]; then
+	log_error "$MOUNT_POINT is already mounted from $mounted_source instead of $device"
+	exit 1
+fi
+
+uci -q batch <<EOF || {
+set fstab.docker=mount
+set fstab.docker.target='$MOUNT_POINT'
+set fstab.docker.uuid='$uuid'
+set fstab.docker.fstype='ext4'
+set fstab.docker.options='rw,noatime'
+set fstab.docker.enabled='1'
+set fstab.docker.check_fs='1'
+commit fstab
+EOF
+	log_error "cannot persist UUID mount in /etc/config/fstab"
+	exit 1
+}
+
+if [ -z "$mounted_source" ]; then
+	mount -t ext4 -o rw,noatime "$device" "$MOUNT_POINT" || {
+		log_error "cannot mount $device at $MOUNT_POINT"
+		exit 1
+	}
+fi
+
+mounted_source="$(awk -v target="$MOUNT_POINT" '$2 == target { print $1; exit }' /proc/mounts)"
+[ "$mounted_source" = "$device" ] || {
+	log_error "$MOUNT_POINT is not backed by $device after mount"
+	exit 1
+}
+
+uci -q batch <<EOF || {
+set dockerd.globals.data_root='$MOUNT_POINT/'
+set dockerd.globals.storage_driver='overlay2'
+commit dockerd
+EOF
+	log_error "cannot persist dockerd storage configuration"
+	exit 1
+}
+
+logger -t "$TAG" -p notice "validated $device (UUID=$uuid, ext4) at $MOUNT_POINT"
+exit 0

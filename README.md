@@ -147,3 +147,20 @@ https://github.com/kenzok8/small-package.git
 1. 打开系统设置 → 启动项 → 定位到「appfilter」
 2. 将「appfilter」当前状态从已禁用更改为已启用
 3. 完成配置后，点击启动按钮激活服务
+
+## JDCloud IPQ60xx Docker storage
+
+The `jdcloud_ipq60xx_immwrt` build includes Dockerman and an eMMC storage guard
+for RE-SS-01, RE-CS-02, RE-CS-07, and Redmi AX5 JDCloud. Docker starts only
+when exactly one EXT4 filesystem with label `docker` is available. The guard
+persists its UUID in `/etc/config/fstab`, mounts it at `/opt/docker`, and forces
+Docker to use `/opt/docker/` with the `overlay2` storage driver.
+
+The firmware intentionally does not create or format partitions. GPT geometry
+differs by model, and an automatic partition operation could overwrite boot,
+ART, or rootfs data. If the labeled EXT4 partition is missing, dockerd refuses
+to start instead of silently writing container data to the F2FS root overlay.
+
+Prefer a compatible `sysupgrade.bin` after the Docker partition has been
+created and verified. A `factory.bin` may replace the device GPT and remove a
+manually added Docker partition.

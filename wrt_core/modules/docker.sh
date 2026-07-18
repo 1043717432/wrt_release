@@ -97,6 +97,48 @@ _docker_stack_set_or_append_sysctl_value() {
     fi
 }
 
+_docker_stack_install_jdcloud_storage_guard() {
+    local build_dir="$1"
+    local dockerd_init="$2"
+    local guard_source="$BASE_PATH/patches/jdcloud-docker-storage"
+    local guard_target="$build_dir/package/base-files/files/usr/libexec/jdcloud-docker-storage"
+    local tmp_path=""
+
+    [ "${WRT_BUILD_DEVICE:-}" = "jdcloud_ipq60xx_immwrt" ] || return 0
+
+    [ -f "$guard_source" ] || {
+        echo "错误：未找到 JDCloud Docker 存储保护脚本: $guard_source" >&2
+        return 1
+    }
+
+    install -Dm755 "$guard_source" "$guard_target" || return 1
+
+    grep -Fq '/usr/libexec/jdcloud-docker-storage' "$dockerd_init" && return 0
+
+    tmp_path=$(mktemp) || return 1
+    awk '
+        {
+            print
+            if ($0 ~ /^start_service\(\)[[:space:]]*\{[[:space:]]*$/ && inserted == 0) {
+                print "\t/usr/libexec/jdcloud-docker-storage || {"
+                print "\t\tlogger -t \"dockerd-init\" -p err \"JDCloud Docker storage validation failed; dockerd will not start on root overlay\""
+                print "\t\treturn 1"
+                print "\t}"
+                inserted = 1
+            }
+        }
+        END {
+            if (inserted == 0) exit 2
+        }
+    ' "$dockerd_init" > "$tmp_path" || {
+        rm -f "$tmp_path"
+        echo "错误：无法向 $dockerd_init 注入 JDCloud Docker 存储保护" >&2
+        return 1
+    }
+
+    mv "$tmp_path" "$dockerd_init"
+}
+
 _docker_stack_update_dockerd_depends_block() {
     local mk_path="$1"
     local tmp_path=""
@@ -911,6 +953,9 @@ docker_stack_sync_nftables_compat() {
             echo "[dry-run] dockerd storage_driver will be omitted for Docker auto-selection"
         fi
         echo "[dry-run] dockerd forwarding sysctls will be set to 1"
+        if [ "${WRT_BUILD_DEVICE:-}" = "jdcloud_ipq60xx_immwrt" ]; then
+            echo "[dry-run] JDCloud dockerd startup will require a mounted ext4 filesystem labeled docker"
+        fi
         docker_stack_sync_dockerman_nftables_compat "$build_dir" "1" || return 1
         return 0
     fi
@@ -919,6 +964,7 @@ docker_stack_sync_nftables_compat() {
     _docker_stack_fix_dockerd_vendored_checks "$dockerd_makefile" || return 1
 
     _docker_stack_ensure_nftables_init_support "$dockerd_init" || return 1
+    _docker_stack_install_jdcloud_storage_guard "$build_dir" "$dockerd_init" || return 1
     docker_stack_sync_dockerman_nftables_compat "$build_dir" "0" || return 1
 
     _docker_stack_set_or_append_dockerd_uci_option "$dockerd_config" "firewall_backend" "nftables" || return 1
