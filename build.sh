@@ -415,6 +415,7 @@ verify_jdcloud_re_cs_07_config() {
     local required_packages=(
         acme-acmesh acme-acmesh-dnsapi frpc npc
         luci-app-acme luci-app-frpc luci-app-npc
+        luci-app-passwall sing-box chinadns-ng
         dockerd luci-app-dockerman block-mount kmod-fs-ext4
     )
     local package
@@ -442,10 +443,6 @@ verify_jdcloud_re_cs_07_config() {
         }
     done
 
-    if grep -qx 'CONFIG_PACKAGE_luci-app-passwall=y' "$config_path"; then
-        echo "Error: Passwall must not be present in the RE-CS-07 stability baseline." >&2
-        return 1
-    fi
 }
 
 collect_jdcloud_re_cs_07_firmware() {
@@ -455,6 +452,7 @@ collect_jdcloud_re_cs_07_firmware() {
     local package
     local required_manifest_packages=(
         acme-acmesh frpc npc luci-app-acme luci-app-frpc luci-app-npc
+        luci-app-passwall sing-box chinadns-ng
         dockerd luci-app-dockerman block-mount kmod-fs-ext4
     )
     local bins=()
