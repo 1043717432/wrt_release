@@ -418,6 +418,7 @@ verify_jdcloud_re_cs_07_config() {
         dockerd luci-app-dockerman block-mount kmod-fs-ext4
     )
     local package
+    local manifests=()
     local selected_profiles
 
     [[ $Dev == "jdcloud_ipq60xx_immwrt" ]] || return 0
@@ -480,11 +481,13 @@ collect_jdcloud_re_cs_07_firmware() {
         return 1
     fi
 
-    manifest=$(find "$target_dir" -type f -name '*.manifest' -print -quit)
-    [[ -n $manifest ]] || {
-        echo "Error: package manifest was not generated." >&2
+    mapfile -t manifests < <(find "$target_dir" -type f -name '*.manifest' ! -name 'Packages.manifest' -print)
+    if [[ ${#manifests[@]} -ne 1 ]]; then
+        echo "Error: expected exactly one device package manifest, found ${#manifests[@]}." >&2
+        printf '  %s\n' "${manifests[@]}" >&2
         return 1
-    }
+    fi
+    manifest="${manifests[0]}"
     for package in "${required_manifest_packages[@]}"; do
         grep -qE "^${package}[[:space:]]+-[[:space:]]+" "$manifest" || {
             echo "Error: required package $package is missing from the firmware manifest." >&2
