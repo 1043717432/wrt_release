@@ -410,6 +410,103 @@ apply_config() {
 
 }
 
+verify_jdcloud_re_cs_07_config() {
+    local config_path="$BASE_PATH/../$BUILD_DIR/.config"
+    local required_packages=(
+        acme-acmesh acme-acmesh-dnsapi frpc npc
+        luci-app-acme luci-app-frpc luci-app-npc
+        dockerd luci-app-dockerman block-mount kmod-fs-ext4
+    )
+    local package
+    local selected_profiles
+
+    [[ $Dev == "jdcloud_ipq60xx_immwrt" ]] || return 0
+
+    grep -qx 'CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-07=y' "$config_path" || {
+        echo "Error: jdcloud_re-cs-07 profile was not selected after defconfig." >&2
+        return 1
+    }
+
+    selected_profiles=$(grep -Ec '^CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_.+=y$' "$config_path" || true)
+    if [[ $selected_profiles -ne 1 ]]; then
+        echo "Error: expected exactly one IPQ60xx device profile, found $selected_profiles." >&2
+        grep -E '^CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_.+=y$' "$config_path" >&2 || true
+        return 1
+    fi
+
+    for package in "${required_packages[@]}"; do
+        grep -qx "CONFIG_PACKAGE_${package}=y" "$config_path" || {
+            echo "Error: required package $package was not selected after defconfig." >&2
+            return 1
+        }
+    done
+
+    if grep -qx 'CONFIG_PACKAGE_luci-app-passwall=y' "$config_path"; then
+        echo "Error: Passwall must not be present in the RE-CS-07 stability baseline." >&2
+        return 1
+    fi
+}
+
+collect_jdcloud_re_cs_07_firmware() {
+    local target_dir="$1"
+    local firmware_dir="$2"
+    local manifest
+    local package
+    local required_manifest_packages=(
+        acme-acmesh frpc npc luci-app-acme luci-app-frpc luci-app-npc
+        dockerd luci-app-dockerman block-mount kmod-fs-ext4
+    )
+    local bins=()
+
+    mapfile -t bins < <(find "$target_dir" -type f -name '*jdcloud_re-cs-07*.bin' -print)
+    if [[ ${#bins[@]} -ne 2 ]]; then
+        echo "Error: expected exactly two RE-CS-07 firmware images, found ${#bins[@]}." >&2
+        printf '  %s\n' "${bins[@]}" >&2
+        return 1
+    fi
+
+    [[ $(basename "${bins[0]}") == *-squashfs-factory.bin || $(basename "${bins[1]}") == *-squashfs-factory.bin ]] || {
+        echo "Error: RE-CS-07 factory image is missing." >&2
+        return 1
+    }
+    [[ $(basename "${bins[0]}") == *-squashfs-sysupgrade.bin || $(basename "${bins[1]}") == *-squashfs-sysupgrade.bin ]] || {
+        echo "Error: RE-CS-07 sysupgrade image is missing." >&2
+        return 1
+    }
+
+    if find "$target_dir" -type f -name '*.bin' ! -name '*jdcloud_re-cs-07*.bin' -print -quit | grep -q .; then
+        echo "Error: another device firmware image was generated:" >&2
+        find "$target_dir" -type f -name '*.bin' ! -name '*jdcloud_re-cs-07*.bin' -print >&2
+        return 1
+    fi
+
+    manifest=$(find "$target_dir" -type f -name '*.manifest' -print -quit)
+    [[ -n $manifest ]] || {
+        echo "Error: package manifest was not generated." >&2
+        return 1
+    }
+    for package in "${required_manifest_packages[@]}"; do
+        grep -qE "^${package}[[:space:]]+-[[:space:]]+" "$manifest" || {
+            echo "Error: required package $package is missing from the firmware manifest." >&2
+            return 1
+        }
+    done
+
+    cp -f "${bins[@]}" "$firmware_dir/"
+    cp -f "$manifest" "$firmware_dir/"
+    cp -f "$BASE_PATH/../$BUILD_DIR/.config" "$firmware_dir/build.config"
+    {
+        echo "repository=$REPO_URL"
+        echo "branch=$REPO_BRANCH"
+        echo "commit=$COMMIT_HASH"
+        echo "device=jdcloud_re-cs-07"
+        echo "docker_data_root=/opt/docker/"
+        echo "docker_storage_driver=overlay2"
+        echo "docker_firewall_backend=nftables"
+    } >"$firmware_dir/source-metadata.txt"
+    (cd "$firmware_dir" && sha256sum -- *.bin >SHA256SUMS)
+}
+
 # 读取设备元信息，确定上游源码和构建目录。
 REPO_URL=$(read_ini_by_key "REPO_URL")
 REPO_BRANCH=$(read_ini_by_key "REPO_BRANCH")
@@ -443,6 +540,7 @@ remove_uhttpd_dependency
 
 cd "$BASE_PATH/../$BUILD_DIR"
 make defconfig
+verify_jdcloud_re_cs_07_config
 
 if grep -qE "^CONFIG_TARGET_x86_64=y" "$CONFIG_FILE"; then
     DISTFEEDS_PATH="$BASE_PATH/../$BUILD_DIR/package/emortal/default-settings/files/99-distfeeds.conf"
@@ -466,7 +564,11 @@ make -j$(($(nproc) + 1)) || make -j1 V=s
 FIRMWARE_DIR="$BASE_PATH/../firmware"
 \rm -rf "$FIRMWARE_DIR"
 mkdir -p "$FIRMWARE_DIR"
-find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
+if [[ $Dev == "jdcloud_ipq60xx_immwrt" ]]; then
+    collect_jdcloud_re_cs_07_firmware "$TARGET_DIR" "$FIRMWARE_DIR"
+else
+    find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
+fi
 \rm -f "$BASE_PATH/../firmware/Packages.manifest" 2>/dev/null
 
 if [[ -d action_build ]]; then

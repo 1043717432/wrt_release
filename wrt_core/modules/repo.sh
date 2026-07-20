@@ -41,6 +41,7 @@ reset_feeds_conf() {
     git_retry clean -f -d
     git_retry pull
     if [[ $COMMIT_HASH != "none" ]]; then
-        git_retry checkout "$COMMIT_HASH"
+        git_retry fetch --depth 1 origin "$COMMIT_HASH"
+        git_retry checkout --detach "$COMMIT_HASH"
     fi
 }

@@ -164,14 +164,14 @@ install_custom_feed() {
         luci-app-quickstart luci-app-istorex luci-app-cloudflarespeedtest netdata luci-app-netdata \
         lucky luci-app-lucky luci-app-openclash luci-app-homeproxy luci-app-amlogic \
         oaf open-app-filter luci-app-oaf easytier luci-app-easytier \
-        msd_lite luci-app-msd_lite cups luci-app-cupsd
+        msd_lite luci-app-msd_lite cups luci-app-cupsd nps luci-app-npc
     )
     local required_feed_dirs=(
         cups tcping v2ray-geodata luci-lib-taskd luci-app-openclash
         luci-app-quickstart luci-app-store luci-app-homeproxy luci-app-mosdns
         luci-app-passwall nikki luci-app-nikki mihomo-meta
         open-app-filter luci-app-oaf lucky luci-app-lucky luci-app-easytier
-        luci-app-emmc-health
+        luci-app-emmc-health nps luci-app-npc
     )
     local custom_feed_sources=()
     local missing_feed_dirs=()
@@ -227,6 +227,11 @@ install_custom_feed() {
         rm -rf "$custom_feed_dir"
         return 1
     fi
+
+    install -m 0644 "$BASE_PATH/patches/npc.config" \
+        "$custom_feed_dir/luci-app-npc/root/etc/config/npc"
+    install -m 0755 "$BASE_PATH/patches/npc.init" \
+        "$custom_feed_dir/luci-app-npc/root/etc/init.d/npc"
 
     register_local_feed_source "$custom_feed_dir" "$feeds_path"
 
