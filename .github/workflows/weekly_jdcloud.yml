@@ -1,0 +1,77 @@
+name: Weekly JDCloud IPQ60xx
+
+on:
+  schedule:
+    # GitHub cron uses UTC: Sunday 02:00 UTC = Sunday 10:00 China time.
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build even when the upstream commit is unchanged
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  update-and-build:
+    runs-on: ubuntu-24.04
+    env:
+      FIRMWARE_BRANCH: codex/jdcloud-docker-storage
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FIRMWARE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Check ImmortalWrt upstream
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest="$(git ls-remote https://github.com/VIKINGYFY/immortalwrt.git refs/heads/main | awk '{print $1}')"
+          test "${#latest}" -eq 40
+          current="$(awk -F= '$1 == "COMMIT_HASH" {print $2}' wrt_core/compilecfg/jdcloud_ipq60xx_immwrt.ini)"
+          echo "latest=$latest"
+          echo "current=$current"
+          if [[ "$latest" == "$current" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pin latest upstream commit
+        if: steps.upstream.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest="${{ steps.upstream.outputs.latest }}"
+          sed -i -E "s/^COMMIT_HASH=.*/COMMIT_HASH=${latest}/" wrt_core/compilecfg/jdcloud_ipq60xx_immwrt.ini
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add wrt_core/compilecfg/jdcloud_ipq60xx_immwrt.ini
+          git commit -m "chore(jdcloud): track latest ImmortalWrt upstream"
+          git push origin "HEAD:${FIRMWARE_BRANCH}"
+
+      - name: Dispatch JDCloud build
+        if: steps.upstream.outputs.changed == 'true' || inputs.force_build == true
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build_wrt.yml',
+              ref: process.env.FIRMWARE_BRANCH,
+              inputs: { model: 'jdcloud_ipq60xx_immwrt' }
+            })
+
+      - name: No upstream change
+        if: steps.upstream.outputs.changed != 'true' && inputs.force_build != true
+        run: echo "ImmortalWrt main unchanged; weekly build skipped."
