@@ -2,19 +2,9 @@
 
 set -e
 
-# 定位 wrt_core，兼容仓库根目录或上级目录调用。
-if [ -d "wrt_core" ]; then
-    WRT_CORE_PATH="wrt_core"
-elif [ -d "../wrt_core" ]; then
-    WRT_CORE_PATH="../wrt_core"
-else
-    echo "Error: wrt_core directory not found!"
-    exit 1
-fi
-
-BASE_PATH=$(cd "$WRT_CORE_PATH" && pwd)
-
-REPO_ROOT=$(cd "$BASE_PATH/.." && pwd)
+# 所有构建路径以脚本所在仓库为锚，不依赖调用目录。
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+BASE_PATH="$REPO_ROOT/wrt_core"
 
 Dev=$1
 Build_Mod=$2
@@ -47,7 +37,7 @@ collect_supported_devs() {
 
 print_usage() {
     echo "Usage: $0 <device> [debug|container|container_debug|config_preview]"
-    echo "       ./start.sh"
+    echo "       $0"
 }
 
 print_supported_devs() {
@@ -195,197 +185,21 @@ fi
 
 validate_build_mode
 
-read_ini_by_key() {
-    local key=$1
-    awk -F"=" -v key="$key" '$1 == key {print $2}' "$INI_FILE"
-}
-
+BASE_CONFIG_FILE="$BASE_PATH/deconfig/common/compile_base.config"
 CONFIG_FRAGMENT_DIR="$BASE_PATH/deconfig/fragments"
 DEFAULT_CONFIG_FRAGMENTS=()
 ADD_CONFIG_FRAGMENT_LIST=()
 REMOVE_CONFIG_FRAGMENT_LIST=()
 EFFECTIVE_CONFIG_FRAGMENTS=()
 
-parse_fragment_csv() {
-    local csv=$1
-    local output_array=$2
-    local item
-    local -n target_array="$output_array"
-
-    target_array=()
-    csv=${csv//[[:space:]]/}
-    [[ -n $csv ]] || return 0
-
-    IFS=',' read -r -a target_array <<< "$csv"
-    for item in "${target_array[@]}"; do
-        if [[ -z $item ]]; then
-            echo "Error: empty config fragment name in '$csv'." >&2
-            exit 1
-        fi
-
-        if [[ ! $item =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
-            echo "Error: invalid config fragment name '$item'." >&2
-            exit 1
-        fi
-    done
-}
-
-fragment_in_list() {
-    local fragment=$1
-    shift
-    local item
-
-    for item in "$@"; do
-        [[ $item == "$fragment" ]] && return 0
-    done
-
-    return 1
-}
-
-append_unique_fragment() {
-    local fragment=$1
-    local output_array=$2
-    local -n target_array="$output_array"
-
-    fragment_in_list "$fragment" "${target_array[@]}" && return 0
-    target_array+=("$fragment")
-}
-
-validate_enable_fragment() {
-    local fragment=$1
-    local fragment_path="$CONFIG_FRAGMENT_DIR/$fragment.config"
-
-    if [[ ! -f $fragment_path ]]; then
-        echo "Error: config fragment not found: $fragment_path" >&2
-        exit 1
-    fi
-}
-
-join_fragments() {
-    local IFS=','
-    echo "$*"
-}
-
-resolve_config_fragments() {
-    local fragment
-    local candidate_fragments=()
-
-    parse_fragment_csv "$(read_ini_by_key "CONFIG_FRAGMENTS")" DEFAULT_CONFIG_FRAGMENTS
-    parse_fragment_csv "${ADD_CONFIG_FRAGMENTS:-}" ADD_CONFIG_FRAGMENT_LIST
-    parse_fragment_csv "${REMOVE_CONFIG_FRAGMENTS:-}" REMOVE_CONFIG_FRAGMENT_LIST
-
-    for fragment in "${DEFAULT_CONFIG_FRAGMENTS[@]}" "${ADD_CONFIG_FRAGMENT_LIST[@]}" "${REMOVE_CONFIG_FRAGMENT_LIST[@]}"; do
-        validate_enable_fragment "$fragment"
-    done
-
-    for fragment in "${DEFAULT_CONFIG_FRAGMENTS[@]}" "${ADD_CONFIG_FRAGMENT_LIST[@]}"; do
-        append_unique_fragment "$fragment" candidate_fragments
-    done
-
-    EFFECTIVE_CONFIG_FRAGMENTS=()
-    for fragment in "${candidate_fragments[@]}"; do
-        if ! fragment_in_list "$fragment" "${REMOVE_CONFIG_FRAGMENT_LIST[@]}"; then
-            EFFECTIVE_CONFIG_FRAGMENTS+=("$fragment")
-        fi
-    done
-
-    for fragment in "${REMOVE_CONFIG_FRAGMENT_LIST[@]}"; do
-        if [[ $fragment == "nss" ]]; then
-            echo "Warning: removing platform fragment 'nss' is high risk." >&2
-        fi
-    done
-}
-
-print_config_fragment_summary() {
-    echo "Config fragments:"
-    echo "  Device: $Dev"
-    echo "  Default fragments: $(join_fragments "${DEFAULT_CONFIG_FRAGMENTS[@]}")"
-    echo "  Add fragments: $(join_fragments "${ADD_CONFIG_FRAGMENT_LIST[@]}")"
-    echo "  Remove fragments: $(join_fragments "${REMOVE_CONFIG_FRAGMENT_LIST[@]}")"
-    echo "  Effective fragments: $(join_fragments "${EFFECTIVE_CONFIG_FRAGMENTS[@]}")"
-}
-
-print_config_preview() {
-    print_config_fragment_summary
-    echo "Config assembly order:"
-    echo "  1) $CONFIG_FILE"
-    echo "  2) $BASE_PATH/deconfig/compile_base.config"
-
-    local order=3
-    local fragment
-    for fragment in "${EFFECTIVE_CONFIG_FRAGMENTS[@]}"; do
-        echo "  $order) $CONFIG_FRAGMENT_DIR/$fragment.config"
-        order=$((order + 1))
-    done
-
-}
-
-prepare_container_image() {
-    local base_image=$1
-    local image_name=$2
-    local container_tmp_Dockerfile
-    local container_default_user
-
-    container_tmp_Dockerfile=$(mktemp Dockerfile.XXXXXX)
-
-    cleanup_container_dockerfile() {
-        rm -f "$container_tmp_Dockerfile"
-    }
-
-    trap cleanup_container_dockerfile RETURN
-
-    docker pull "$base_image"
-    container_default_user=$(docker run --rm "$base_image" whoami)
-    cat > "$container_tmp_Dockerfile" <<EOF
-FROM $base_image
-USER root
-RUN apt-get update && apt-get install -y sudo git jq build-essential cmake g++ clang bison flex libelf-dev libncurses5-dev python3-distutils zlib1g-dev python3 pkg-config libssl-dev
-USER $container_default_user
-RUN git config --global pull.rebase false
-RUN git config --global advice.detachedHead false
-CMD ["bash", "wrt_core/build_container.sh", "$image_name"]
-EOF
-    docker build -t "$image_name" -f "$container_tmp_Dockerfile" .
-}
-
-run_container_build() {
-    local container_build_mod=$1
-    local build_target_sdk
-    local container_name
-
-    build_target_sdk=$(read_ini_by_key "BUILD_TARGET_SDK")
-
-    if [[ -z "$build_target_sdk" ]]; then
-        echo "BUILD_TARGET_SDK not specified in $INI_FILE. Using default: openwrt-25.12"
-        build_target_sdk="immortalwrt/sdk:openwrt-25.12"
-    fi
-
-    container_name="$(echo "$Dev" | tr '[:upper:]' '[:lower:]' | tr '/:' '-_')-build-container"
-
-    prepare_container_image "$build_target_sdk" "$container_name"
-    docker run --rm -it \
-        -v "$REPO_ROOT":/build \
-        -w /build \
-        -e ADD_CONFIG_FRAGMENTS \
-        -e REMOVE_CONFIG_FRAGMENTS \
-        --shm-size=8g \
-        --ipc=shareable \
-        --ulimit nofile=65535:65535 \
-        "$container_name" \
-        bash wrt_core/build_container.sh "$Dev" "$container_build_mod"
-}
-
-remove_uhttpd_dependency() {
-    local config_path="$BASE_PATH/../$BUILD_DIR/.config"
-    local luci_makefile_path="$BASE_PATH/../$BUILD_DIR/feeds/luci/collections/luci/Makefile"
-
-    if grep -q "CONFIG_PACKAGE_luci-app-quickfile=y" "$config_path"; then
-        if [ -f "$luci_makefile_path" ]; then
-            sed -i '/luci-light/d' "$luci_makefile_path"
-            echo "Removed uhttpd (luci-light) dependency as luci-app-quickfile (nginx) is enabled."
-        fi
-    fi
-}
+source "$BASE_PATH/modules/lib/common.sh"
+source "$BASE_PATH/modules/config.sh"
+source "$BASE_PATH/modules/container_build.sh"
+source "$BASE_PATH/modules/post_config_fixes.sh"
+if [[ ! -f "$BASE_CONFIG_FILE" ]]; then
+    echo "Base config not found: $BASE_CONFIG_FILE" >&2
+    exit 1
+fi
 
 if [[ $Build_Mod == "container" ]]; then
     run_container_build ""
@@ -397,117 +211,6 @@ if [[ $Build_Mod == "container_debug" ]]; then
     exit 0
 fi
 
-apply_config() {
-    local fragment
-
-    \cp -f "$CONFIG_FILE" "$BASE_PATH/../$BUILD_DIR/.config"
-
-    cat "$BASE_PATH/deconfig/compile_base.config" >> "$BASE_PATH/../$BUILD_DIR/.config"
-
-    for fragment in "${EFFECTIVE_CONFIG_FRAGMENTS[@]}"; do
-        cat "$CONFIG_FRAGMENT_DIR/$fragment.config" >> "$BASE_PATH/../$BUILD_DIR/.config"
-    done
-
-}
-
-verify_jdcloud_re_cs_07_config() {
-    local config_path="$BASE_PATH/../$BUILD_DIR/.config"
-    local required_packages=(
-        acme-acmesh acme-acmesh-dnsapi frpc npc
-        luci-app-acme luci-app-frpc luci-app-npc
-        luci-app-passwall sing-box chinadns-ng
-        dockerd luci-app-dockerman block-mount kmod-fs-ext4
-    )
-    local package
-    local manifests=()
-    local selected_profiles
-
-    [[ $Dev == "jdcloud_ipq60xx_immwrt" ]] || return 0
-
-    grep -qx 'CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-07=y' "$config_path" || {
-        echo "Error: jdcloud_re-cs-07 profile was not selected after defconfig." >&2
-        return 1
-    }
-
-    selected_profiles=$(grep -Ec '^CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_.+=y$' "$config_path" || true)
-    if [[ $selected_profiles -ne 1 ]]; then
-        echo "Error: expected exactly one IPQ60xx device profile, found $selected_profiles." >&2
-        grep -E '^CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_.+=y$' "$config_path" >&2 || true
-        return 1
-    fi
-
-    for package in "${required_packages[@]}"; do
-        grep -qx "CONFIG_PACKAGE_${package}=y" "$config_path" || {
-            echo "Error: required package $package was not selected after defconfig." >&2
-            return 1
-        }
-    done
-
-}
-
-collect_jdcloud_re_cs_07_firmware() {
-    local target_dir="$1"
-    local firmware_dir="$2"
-    local manifest
-    local package
-    local required_manifest_packages=(
-        acme-acmesh frpc npc luci-app-acme luci-app-frpc luci-app-npc
-        luci-app-passwall sing-box chinadns-ng
-        dockerd luci-app-dockerman block-mount kmod-fs-ext4
-    )
-    local bins=()
-
-    mapfile -t bins < <(find "$target_dir" -type f -name '*jdcloud_re-cs-07*.bin' -print)
-    if [[ ${#bins[@]} -ne 2 ]]; then
-        echo "Error: expected exactly two RE-CS-07 firmware images, found ${#bins[@]}." >&2
-        printf '  %s\n' "${bins[@]}" >&2
-        return 1
-    fi
-
-    [[ $(basename "${bins[0]}") == *-squashfs-factory.bin || $(basename "${bins[1]}") == *-squashfs-factory.bin ]] || {
-        echo "Error: RE-CS-07 factory image is missing." >&2
-        return 1
-    }
-    [[ $(basename "${bins[0]}") == *-squashfs-sysupgrade.bin || $(basename "${bins[1]}") == *-squashfs-sysupgrade.bin ]] || {
-        echo "Error: RE-CS-07 sysupgrade image is missing." >&2
-        return 1
-    }
-
-    if find "$target_dir" -type f -name '*.bin' ! -name '*jdcloud_re-cs-07*.bin' -print -quit | grep -q .; then
-        echo "Error: another device firmware image was generated:" >&2
-        find "$target_dir" -type f -name '*.bin' ! -name '*jdcloud_re-cs-07*.bin' -print >&2
-        return 1
-    fi
-
-    mapfile -t manifests < <(find "$target_dir" -type f -name '*.manifest' ! -name 'Packages.manifest' -print)
-    if [[ ${#manifests[@]} -ne 1 ]]; then
-        echo "Error: expected exactly one device package manifest, found ${#manifests[@]}." >&2
-        printf '  %s\n' "${manifests[@]}" >&2
-        return 1
-    fi
-    manifest="${manifests[0]}"
-    for package in "${required_manifest_packages[@]}"; do
-        grep -qE "^${package}[[:space:]]+-[[:space:]]+" "$manifest" || {
-            echo "Error: required package $package is missing from the firmware manifest." >&2
-            return 1
-        }
-    done
-
-    cp -f "${bins[@]}" "$firmware_dir/"
-    cp -f "$manifest" "$firmware_dir/"
-    cp -f "$BASE_PATH/../$BUILD_DIR/.config" "$firmware_dir/build.config"
-    {
-        echo "repository=$REPO_URL"
-        echo "branch=$REPO_BRANCH"
-        echo "commit=$COMMIT_HASH"
-        echo "device=jdcloud_re-cs-07"
-        echo "docker_data_root=/opt/docker/"
-        echo "docker_storage_driver=overlay2"
-        echo "docker_firewall_backend=nftables"
-    } >"$firmware_dir/source-metadata.txt"
-    (cd "$firmware_dir" && sha256sum -- *.bin >SHA256SUMS)
-}
-
 # 读取设备元信息，确定上游源码和构建目录。
 REPO_URL=$(read_ini_by_key "REPO_URL")
 REPO_BRANCH=$(read_ini_by_key "REPO_BRANCH")
@@ -516,11 +219,6 @@ BUILD_DIR=$(read_ini_by_key "BUILD_DIR")
 COMMIT_HASH=$(read_ini_by_key "COMMIT_HASH")
 COMMIT_HASH=${COMMIT_HASH:-none}
 
-export WRT_BUILD_DEVICE="$Dev"
-if [[ $Dev == "jdcloud_ipq60xx_immwrt" ]]; then
-    export DOCKER_STACK_STORAGE_DRIVER="overlay2"
-fi
-
 resolve_config_fragments
 
 if [[ $Build_Mod == "config_preview" ]]; then
@@ -528,33 +226,36 @@ if [[ $Build_Mod == "config_preview" ]]; then
     exit 0
 fi
 
-if [[ -d action_build ]]; then
+if [[ -d "$REPO_ROOT/action_build" ]]; then
     # GitHub Actions 使用 action_build 作为固定构建目录。
     BUILD_DIR="action_build"
 fi
+if [[ -z "$BUILD_DIR" ]]; then
+    echo "BUILD_DIR is not configured in $INI_FILE" >&2
+    exit 1
+fi
+BUILD_ROOT="$BUILD_DIR"
+[[ "$BUILD_ROOT" == /* ]] || BUILD_ROOT="$REPO_ROOT/$BUILD_ROOT"
 
-"$BASE_PATH/update.sh" "$REPO_URL" "$REPO_BRANCH" "$BUILD_DIR" "$COMMIT_HASH"
+# 供 docker.sh 等模块识别当前设备（JDCloud Docker 存储保护依赖此变量）。
+export WRT_BUILD_DEVICE="$Dev"
+
+"$BASE_PATH/update.sh" "$REPO_URL" "$REPO_BRANCH" "$BUILD_ROOT" "$COMMIT_HASH"
 
 apply_config
 print_config_fragment_summary
 remove_uhttpd_dependency
 
-cd "$BASE_PATH/../$BUILD_DIR"
+cd "$BUILD_ROOT"
 make defconfig
-verify_jdcloud_re_cs_07_config
 
-if grep -qE "^CONFIG_TARGET_x86_64=y" "$CONFIG_FILE"; then
-    DISTFEEDS_PATH="$BASE_PATH/../$BUILD_DIR/package/emortal/default-settings/files/99-distfeeds.conf"
-    if [ -d "${DISTFEEDS_PATH%/*}" ] && [ -f "$DISTFEEDS_PATH" ]; then
-        sed -i 's/aarch64_cortex-a53/x86_64/g' "$DISTFEEDS_PATH"
-    fi
-fi
+sync_x86_64_distfeeds
 
 if [[ $Build_Mod == "debug" ]]; then
     exit 0
 fi
 
-TARGET_DIR="$BASE_PATH/../$BUILD_DIR/bin/targets"
+TARGET_DIR="$BUILD_ROOT/bin/targets"
 if [[ -d $TARGET_DIR ]]; then
     find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec rm -f {} +
 fi
@@ -565,11 +266,7 @@ make -j$(($(nproc) + 1)) || make -j1 V=s
 FIRMWARE_DIR="$BASE_PATH/../firmware"
 \rm -rf "$FIRMWARE_DIR"
 mkdir -p "$FIRMWARE_DIR"
-if [[ $Dev == "jdcloud_ipq60xx_immwrt" ]]; then
-    collect_jdcloud_re_cs_07_firmware "$TARGET_DIR" "$FIRMWARE_DIR"
-else
-    find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
-fi
+find "$TARGET_DIR" -type f \( -name "*.bin" -o -name "*.manifest" -o -name "*efi.img.gz" -o -name "*.itb" -o -name "*.fip" -o -name "*.ubi" -o -name "*rootfs.tar.gz" \) -exec cp -f {} "$FIRMWARE_DIR/" \;
 \rm -f "$BASE_PATH/../firmware/Packages.manifest" 2>/dev/null
 
 if [[ -d action_build ]]; then

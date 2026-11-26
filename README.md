@@ -72,18 +72,20 @@ GitHub Actions 的手动构建也提供 `add_fragments` 与 `remove_fragments` �
 | 京东云 | 百里 / AX6000 | `jdcloud_ax6000_immwrt` |
 | 阿里云 | AP8220 | `aliyun_ap8220_immwrt` |
 | 阿里云 | AP8220 - LiBwrt | `aliyun_ap8220_libwrt` |
-| Linksys | MX4200v1、MX4200v2、MX4300 | `linksys_mx4x00_immwrt` |
+| Linksys | MX4200v1、MX4200v2、MX4300 | `linksys_mx4x00_libwrt` |
 | Link | NN6000v2 | `link_nn6000v2_immwrt` |
 | 奇虎 | 360v6 | `qihoo_360v6_immwrt` |
 | 红米 | AX5 | `redmi_ax5_immwrt` |
 | 红米 | AX6 | `redmi_ax6_immwrt` |
 | 红米 | AX6 - LiBwrt | `redmi_ax6_libwrt` |
-| 红米 | AX6000 | `redmi_ax6000_immwrt21` |
 | CMCC（中国移动） | RAX3000M | `cmcc_rax3000m_immwrt` |
+| Cudy | TR3000 | `cudy_tr3000_immwrt` |
 | 斐讯 | N1 | `n1_immwrt` |
 | 兆能 | M2 | `zn_m2_immwrt` |
 | 兆能 | M2 - LiBwrt | `zn_m2_libwrt` |
 | Gemtek | W1701K | `gemtek_w1701k_immwrt` |
+| SuperGateway | S20M | `supergateway_s20m_immwrt` |
+| Nokia | XG-040G-MD UBI | `nokia_040g_immwrt` |
 | x86 | X64 | `x64_immwrt` |
 
 示例：
@@ -106,7 +108,7 @@ GitHub Actions 的手动构建也提供 `add_fragments` 与 `remove_fragments` �
 构建时会按顺序组合配置：
 
 1. 设备专用 `.config`
-2. `compile_base.config`
+2. `wrt_core/deconfig/common/compile_base.config`
 3. `wrt_core/deconfig/fragments/<name>.config` 中的有效配置片段
 
 默认片段由 `compilecfg/*.ini` 的 `CONFIG_FRAGMENTS` 指定：
@@ -125,6 +127,8 @@ GitHub Actions 的手动构建也提供 `add_fragments` 与 `remove_fragments` �
 https://github.com/kenzok8/small-package.git
 ```
 
+HomeProxy、AdGuardHome LuCI 和 TCPing 直接从各自指定仓库同步，不再先取 small-package 再覆盖。HomeProxy 和 AdGuardHome 保留浅克隆 Git 元数据，供 LuCI 生成版本；CUPS 依赖修正在最终 feeds 索引更新前完成。
+
 相关增删和同步逻辑位于 `wrt_core/update.sh` 编排的 `wrt_core/modules/` 静态阶段。配置片段只选择 Kconfig，不负责 clone 仓库、修改 feeds 或安装 feeds。
 
 ## 8. 项目结构说明
@@ -133,34 +137,29 @@ https://github.com/kenzok8/small-package.git
 - `firmware/`：完整构建后的固件输出目录，由脚本自动创建和刷新。
 - `wrt_core/build_container.sh`：容器内构建入口。
 - `wrt_core/update.sh`：源码更新、feeds 调整、软件包同步和补丁应用主流程。
-- `wrt_core/pre_clone_action.sh`：GitHub Actions 预克隆辅助脚本。
+- `wrt_core/ci/`：GitHub Actions 环境初始化与预克隆入口。
 - `wrt_core/compilecfg/`：设备构建元信息 `.ini`。
-- `wrt_core/deconfig/`：设备和共享默认配置 `.config`。
+- `wrt_core/deconfig/`：设备配置；`common/` 保存共享基础配置。
 - `wrt_core/deconfig/fragments/`：可组合配置片段。
-- `wrt_core/modules/`：模块化脚本，包括仓库准备、网络重试、feeds/custom_feed、源码修正、LuCI 修正、服务修正、验证、Docker、CUPS 等静态职责模块。
-- `wrt_core/patches/`：补丁、默认设置、Wi-Fi 初始化、NSS 诊断、PBR 规则和其他构建时注入文件。
+- `wrt_core/modules/`：按源码同步、目标平台、feed 包、LuCI、服务和 Netfilter 分类的函数模块；`lib/` 提供共享辅助函数。`update.sh` 保持显式阶段顺序，配置钩子分别在 `make defconfig` 前后执行。
+- `wrt_core/patches/`：应用到上游源码的补丁文件。
+- `wrt_core/files/`：运行时文件，分为 `uci-defaults/`、`init.d/`、`sbin/`、`pbr/` 和 `misc/`。
+- `wrt_core/assets/`：保留离线可用性的 Lucky 二进制归档。
+
+`x64_immwrt` 使用 `imm-x64/`，`zn_m2_libwrt` 使用 `libwrt/`。已有旧构建目录不会自动迁移或删除；启用新目录后会重新准备源码。
 
 ## 9. OAF（应用过滤）功能使用说明
 
-使用 OAF（应用过滤）功能前，需先完成以下操作：
+当前固件默认禁用 OAF（应用过滤）功能，目的是规避 OAF 驱动可能对网络栈产生的影响。需要使用 OAF 的用户，请确认能够接受启用后的潜在影响。
 
-1. 打开系统设置 → 启动项 → 定位到「appfilter」
-2. 将「appfilter」当前状态从已禁用更改为已启用
-3. 完成配置后，点击启动按钮激活服务
+新版本更新后，首次启用 OAF 需要进入命令行模式（SSH 或串口）执行：
 
-## JDCloud IPQ60xx Docker storage
+```sh
+cd /etc/init.d/
+./appfilter start
+uci set fwx.record.enable=1
+uci commit fwx
+./appfilter start
+```
 
-The `jdcloud_ipq60xx_immwrt` build includes Dockerman and an eMMC storage guard
-for RE-SS-01, RE-CS-02, RE-CS-07, and Redmi AX5 JDCloud. Docker starts only
-when exactly one EXT4 filesystem with label `docker` is available. The guard
-persists its UUID in `/etc/config/fstab`, mounts it at `/opt/docker`, and forces
-Docker to use `/opt/docker/` with the `overlay2` storage driver.
-
-The firmware intentionally does not create or format partitions. GPT geometry
-differs by model, and an automatic partition operation could overwrite boot,
-ART, or rootfs data. If the labeled EXT4 partition is missing, dockerd refuses
-to start instead of silently writing container data to the F2FS root overlay.
-
-Prefer a compatible `sysupgrade.bin` after the Docker partition has been
-created and verified. A `factory.bin` may replace the device GPT and remove a
-manually added Docker partition.
+命令执行完成后，OAF 即完成首次初始化并启动。
