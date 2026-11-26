@@ -67,6 +67,8 @@ reset_feeds_conf() {
     git_retry -C "$BUILD_DIR" clean -f -d
     git_retry -C "$BUILD_DIR" pull
     if [[ $COMMIT_HASH != "none" ]]; then
-        git_retry -C "$BUILD_DIR" checkout "$COMMIT_HASH"
+        # CI 使用 --depth 1 浅克隆，固定提交需要先单独拉取。
+        git_retry -C "$BUILD_DIR" fetch --depth 1 origin "$COMMIT_HASH"
+        git_retry -C "$BUILD_DIR" checkout --detach "$COMMIT_HASH"
     fi
 }
