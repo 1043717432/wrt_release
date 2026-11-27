@@ -1,0 +1,48 @@
+#!/bin/sh /etc/rc.common
+# JDCloud RE-CS-07: 在 eMMC 系统分区里用镜像文件充当 Docker 数据盘（ext4, LABEL=docker）。
+# 必须早于 dockerd(S99)；首次启动若不存在任何 LABEL=docker 的分区且剩余空间足够，自动创建稀疏镜像。
+START=95
+STOP=98
+
+IMG=/overlay/docker.img
+MNT=/opt/docker
+SIZE_GB=3
+MIN_FREE_KB=$(( (SIZE_GB + 1) * 1024 * 1024 ))
+
+log() { logger -t docker-loop "$*"; }
+attached_dev() { losetup -a 2>/dev/null | awk -F: -v img="$IMG" 'index($0, "(" img ")") { print $1; exit }'; }
+other_docker_fs() { block info 2>/dev/null | grep 'LABEL="docker"' | grep -v '^/dev/loop' | head -n1; }
+
+create_image() {
+	local free_kb
+	free_kb=$(df -k /overlay | awk 'NR==2 {print $4}')
+	if [ "${free_kb:-0}" -lt "$MIN_FREE_KB" ]; then
+		log "not enough space on /overlay (${free_kb}kB) for ${SIZE_GB}G docker image"
+		return 1
+	fi
+	# 稀疏文件：不预先写满，避免大量写盘触发看门狗
+	dd if=/dev/zero of="$IMG" bs=1 count=0 seek=${SIZE_GB}G 2>/dev/null || return 1
+	mkfs.ext4 -q -F -L docker -m 0 -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$IMG" || { rm -f "$IMG"; return 1; }
+	log "created ${SIZE_GB}G sparse docker image $IMG"
+}
+
+start() {
+	if [ ! -f "$IMG" ]; then
+		[ -n "$(other_docker_fs)" ] && { log "found existing docker filesystem, skip image"; return 0; }
+		create_image || return 1
+	fi
+	dev=$(attached_dev)
+	[ -n "$dev" ] || dev=$(losetup -f --show "$IMG") || { log "losetup failed"; return 1; }
+	if ! grep -q " $MNT " /proc/mounts; then
+		e2fsck -p "$dev" >/dev/null 2>&1
+		mkdir -p "$MNT"
+		mount -t ext4 -o rw,noatime "$dev" "$MNT" || { log "mount $dev failed"; return 1; }
+	fi
+	log "attached $IMG as $dev on $MNT"
+}
+
+stop() {
+	grep -q " $MNT " /proc/mounts && umount "$MNT"
+	dev=$(attached_dev); [ -n "$dev" ] && losetup -d "$dev"
+	return 0
+}

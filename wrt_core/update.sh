@@ -43,6 +43,7 @@ source "$SCRIPT_DIR/modules/docker.sh"
 source "$SCRIPT_DIR/modules/source_sync.sh"
 source "$SCRIPT_DIR/modules/feed_fixes.sh"
 source "$SCRIPT_DIR/modules/target_fixes.sh"
+source "$SCRIPT_DIR/modules/jdcloud_extras.sh"
 source "$SCRIPT_DIR/modules/netfilter_fixes.sh"
 source "$SCRIPT_DIR/modules/default_settings.sh"
 source "$SCRIPT_DIR/modules/luci_fixes.sh"
@@ -140,6 +141,8 @@ stage_post_install_package_fixes() {
     fix_quectel_cm
     install_pbr_cmcc
     fix_pbr_ip_forward
+    install_jdcloud_docker_runtime
+    bundle_openclash_core
 }
 
 main() {

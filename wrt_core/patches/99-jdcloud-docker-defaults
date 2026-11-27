@@ -1,0 +1,10 @@
+#!/bin/sh
+# 首次启动：启用 Docker 数据盘挂载、日志自动轮转、每日自动清理，并让这些文件在升级保留配置时保留。
+/etc/init.d/docker-loop enable
+uci -q set dockerd.globals.log_driver='local'
+uci -q commit dockerd
+grep -q docker-autoclean /etc/crontabs/root 2>/dev/null || echo "30 4 * * * /usr/bin/docker-autoclean.sh" >> /etc/crontabs/root
+for f in /etc/init.d/docker-loop /usr/bin/docker-autoclean.sh; do
+	grep -qx "$f" /etc/sysupgrade.conf 2>/dev/null || echo "$f" >> /etc/sysupgrade.conf
+done
+exit 0
