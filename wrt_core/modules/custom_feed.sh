@@ -71,36 +71,6 @@ register_local_feed_source() {
     echo "已将 $feed_name 作为本地源 (src-link) 添加到 $feeds_path"
 }
 
-fix_openclaw_build_compile() {
-    local mk_path="$1"
-
-    if [ ! -f "$mk_path" ]; then
-        echo "错误：未找到 luci-app-openclaw Makefile: $mk_path" >&2
-        return 1
-    fi
-    if grep -q '^define Build/Compile' "$mk_path"; then
-        return 0
-    fi
-    if ! grep -q '^\$(eval \$(call BuildPackage' "$mk_path"; then
-        echo "错误：luci-app-openclaw Makefile 中缺少 BuildPackage 调用，无法注入 Build/Compile。" >&2
-        return 1
-    fi
-    local tmp_path
-    tmp_path=$(mktemp) || return 1
-    awk '
-        /^\$\(eval \$\(call BuildPackage/ && !done { print "define Build/Compile"; print "endef"; print ""; done = 1 }
-        { print }
-    ' "$mk_path" >"$tmp_path" && mv "$tmp_path" "$mk_path" || {
-        rm -f "$tmp_path"
-        return 1
-    }
-    grep -q '^define Build/Compile' "$mk_path" || {
-        echo "错误：向 luci-app-openclaw Makefile 注入 Build/Compile 失败。" >&2
-        return 1
-    }
-    echo "已为 luci-app-openclaw 补充空的 Build/Compile。"
-}
-
 install_custom_feed() {
     local feeds_path
     local fullconenat_nft_dir="$BUILD_DIR/package/network/utils/fullconenat-nft"
@@ -124,7 +94,7 @@ install_custom_feed() {
         luci-app-netwiz luci-app-homeproxy luci-app-adguardhome luci-app-mosdns geo2txt
         luci-app-passwall nikki luci-app-nikki mihomo-meta
         open-app-filter luci-app-oaf lucky luci-app-lucky luci-app-easytier
-        luci-app-emmc-health luci-app-airoha-npu luci-app-npc luci-app-openclaw
+        luci-app-emmc-health luci-app-airoha-npu luci-app-npc
     )
     local custom_feed_sources=()
     local missing_feed_dirs=()
@@ -184,18 +154,6 @@ install_custom_feed() {
     fi
 
     if ! sync_repo_root_package_to_feed_dir "https://github.com/adminchenyu/eMMC-Health.git" "main" "$custom_feed_dir" "adminchenyu/eMMC-Health" "luci-app-emmc-health"; then
-        rm -rf "$custom_feed_dir"
-        return 1
-    fi
-
-    if ! sync_repo_root_package_to_feed_dir "https://github.com/10000ge10000/luci-app-openclaw.git" "main" "$custom_feed_dir" "10000ge10000/luci-app-openclaw" "luci-app-openclaw"; then
-        rm -rf "$custom_feed_dir"
-        return 1
-    fi
-
-    # luci-app-openclaw 是纯脚本包，但其 Makefile 未定义 Build/Compile，
-    # 完整固件编译时会回落到默认规则执行 make 并报 "no makefile found"。
-    if ! fix_openclaw_build_compile "$custom_feed_dir/luci-app-openclaw/Makefile"; then
         rm -rf "$custom_feed_dir"
         return 1
     fi
